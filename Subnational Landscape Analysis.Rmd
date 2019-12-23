@@ -1,0 +1,1721 @@
+---
+title: "The Landscape Analysis of Subnational Private Investment in Infrastructure"
+date: "`r Sys.Date()`"
+author: John Michael LaSalle
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    toc: 2
+    mathjax: NULL
+---
+
+```{r knitr_init, echo=FALSE, cache=FALSE}
+library(knitr)
+library(rmdformats)
+
+## Global options
+options(max.print="75")
+opts_chunk$set(echo=FALSE,
+	             cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE,
+               fig.width = 10,
+               fig.height = 6)
+opts_knit$set(width=75)
+```
+
+```{r Set Environment}
+library(raster)
+library(rnaturalearth)
+library(tidyverse)
+library(readxl)
+library(sf)
+library(kableExtra)
+library(leaflet)
+library(gridExtra)
+library(grid)
+library(lattice)
+library(shiny)
+library(vctrs)
+library(here)
+
+options(scipen = 999999999) #turns off scientific notation
+
+```
+
+```{r Load Data}
+data_total <- read_xlsx(here("CustomQuery.xlsx")) %>% 
+  rename(Government = GovtGrantingContract,
+         ProjectName = `Project name`) %>% 
+  mutate(`Primary sector` = ifelse(`Primary sector` == "Information and communication technology (ICT)", "ICT", `Primary sector`),
+         `Financial closure year` = as.numeric(`Financial closure year`),
+         ContractPeriod = as.numeric(ifelse(ContractPeriod %in% c("Not Available", "Not Applicable"), NA,ContractPeriod)),
+         InvestmentYear = as.numeric(InvestmentYear),
+         `Total Equity` = as.numeric(`Total Equity`), #*10e5, #Equity was in was in millions USD
+         PercentPrivate = as.numeric(PercentPrivate)/100, #percent was in range 1:100
+         FeesToGovernment = as.numeric(FeesToGovernment), #*10e5,
+         PhysicalAssets = as.numeric(PhysicalAssets), #*10e5, #Assets was in was in millions USD
+         TotalInvestment = as.numeric(TotalInvestment), #*10e5, #investment was in millions USD
+         Sponsors = str_replace_all(Sponsors, "_x000d_", " "),
+         MultiLateralSupport = str_replace_all(MultiLateralSupport, "_x000d_", " "),
+         TotalDebtFunding = ifelse(TotalDebtFunding == "Not Available",
+                                   NA,
+                                   ifelse(TotalDebtFunding == "Not Applicable", 
+                                          0, 
+                                          as.numeric(TotalDebtFunding))), #*10e5)),
+         ProjectBanks = str_replace_all(ProjectBanks, "_x000d_", " "),
+         UnsolicitedProposal = UnsolicitedProposal,
+         PublicDisclosure = PublicDisclosure,
+         PrivateInvestment = TotalInvestment*PercentPrivate,
+         CommercialProjectBanks = factor(ifelse(str_detect(ProjectBanks, "\\(Commercial"), 1, 0)),
+         leverage_pct = TotalDebtFunding/TotalInvestment,
+         na_count = rowSums(is.na(.))) %>% 
+  mutate(Country = ifelse(Country == "United States", "United States of America", Country),
+         Country = ifelse(Country == "Russian Federation", "Russia", Country),
+         Country = ifelse(Country == "Egypt, Arab Rep.", "Egypt", Country),
+         Country = ifelse(Country == "Korea, Dem. Rep.", "South Korea", Country),
+         Country = ifelse(Country == "Iran, Islamic Rep.", "Iran", Country),
+         Country = ifelse(Country == "Yemen, Rep.", "Yemen", Country),
+         Country = ifelse(Country == "Congo, Dem. Rep.", "Democratic Republic of the Congo", Country),
+         Country = ifelse(Country == "Congo, Rep.", "Republic of Congo", Country),
+         Country = ifelse(Country == "Kyrgyz Republic.", "Kyrgyzstan", Country),
+         Country = ifelse(Country == "Lao PDR", "Laos", Country),
+         Country = ifelse(Country == "Macedonia, FYR", "Macedonia", Country),
+         Country = ifelse(Country == "Guyana, CR", "Guyana", Country),
+         Country = ifelse(Country == "Côte d'Ivoire", "Ivory Coast", Country),
+         Country = ifelse(Country == "Guinea-Bissau", "Guinea Bissau", Country),
+         Country = ifelse(Country == "Kyrgyz Republic", "Kyrgyzstan", Country),
+         Country = ifelse(Country == "São Tomé and Principe", "Sao Tome and Principe", Country),
+         Country = ifelse(Country == "Serbia", "Republic of Serbia", Country),
+         Country = ifelse(Country == "Gambia, The", "Gambia", Country),
+         Country = ifelse(Country == "Syrian Arab Republic", "Syria", Country),
+         Country = ifelse(Country == "Timor-Leste", "East Timor", Country),
+         Country = ifelse(Country == "Tanzania", "United Republic of Tanzania", Country),
+         Country = ifelse(Country == "Venezuela, RB", "Venezuela", Country),
+         Country = ifelse(Country == "West Bank and Gaza", "Palestine", Country)) %>% 
+  mutate_if(is_character, function(x){str_replace_all(x, "<br/>", "\n")}) %>% 
+  mutate_if(is.character, function(x){ifelse(x %in% c("Not Available", "Not Applicable", "N/A"), NA, x)})
+
+
+countries <- ne_countries(returnclass = "sf") %>%
+  dplyr::select(admin, economy, income_grp, region_wb) %>%
+  rbind(.,
+        ne_countries(returnclass = "sf", type = "tiny_countries") %>%
+          dplyr::select(admin, economy, income_grp, region_wb) %>% st_buffer(dist=.5)) %>%
+  filter(duplicated(admin) == F,
+         admin != "Antarctica") %>%
+  st_cast(., "MULTIPOLYGON")
+```
+
+```{r subnational data wrangling}
+data <- data_total %>% 
+  filter(is.na(PercentPrivate) == F,
+         Government %in% c("Local/Municipal", "State/Provincial", "National"),
+         `Project status` != "Cancelled",
+         InvestmentYear >= 1992) %>% 
+  mutate(Government = factor(Government, levels = c("Local/Municipal", "State/Provincial", "National")))
+
+proj_types <- data %>% 
+  group_by(`Type of PPI`, `Subtype of PPI`, Government) %>% 
+  summarise(Total = n(),
+            Energy = sum(ifelse(`Primary sector` == "Energy", 1, 0)),
+            ICT = sum(ifelse(`Primary sector` == "ICT", 1, 0)),
+            Transport = sum(ifelse(`Primary sector` == "Transport", 1, 0)),
+            Waste = sum(ifelse(`Primary sector` == "Municipal Solid Waste", 1, 0)),
+            Water = sum(ifelse(`Primary sector` == "Water and sewerage", 1, 0))) %>% 
+  rename(Government = Government)
+
+#proj_types <- proj_types[order(proj_types$Count, decreasing = T),]
+
+proj_country <- data %>% 
+  group_by(Country) %>% 
+  summarise(Projects =n(),
+            PrivateInvestment = sum(PrivateInvestment, na.rm = T),
+            local = sum(ifelse(Government == "Local/Municipal", 1, 0)),
+            provincial = sum(ifelse(Government == "State/Provincial", 1, 0)),
+            colourscale = log(sum(PrivateInvestment, na.rm = T)+1)) %>% 
+  full_join(countries, ., by=c("admin" = "Country"))
+
+proj_country_sub <- data %>% 
+  filter(Government != "National") %>% 
+  group_by(Country) %>% 
+  summarise(Projects =n(),
+            PrivateInvestment = sum(PrivateInvestment, na.rm = T),
+            local = sum(ifelse(Government == "Local/Municipal", 1, 0)),
+            provincial = sum(ifelse(Government == "State/Provincial", 1, 0)),
+            colourscale = log(sum(PrivateInvestment, na.rm = T)+1)) %>% 
+  full_join(countries, ., by=c("admin" = "Country"))
+```
+
+# Executive Summary
+
+Open data on privately financed infrastructure projects is limited but would be useful. The World Bank’s Private Participation in Infrastructure (PPI) Database shows some of the promise of open data to inform local governments.
+
+**Key Takeaways**
+
+1. Private investment in national government projects vastly outweighs subnational governments.
+1. National summaries hide distinctive characteristics of private investment in local infrastructure.
+1. Only a few countries have projects backed by commercial debt, notably India and Brazil.
+1. Private investment in energy generation at the local level has made the transition to renewable energy but coal still dominates overall.
+
+The analysis in this report highlights where there are distinctive characteristics in private investment in local governments, but does not attempt to identify the causes or impacts of those differences. Further research will be needed to develop policy responses.
+
+# Introduction
+
+The World Bank estimates that the world has USD 94 trillion in unfunded infrastructure needs in the next 20 years.[^1] The increased infrastructure needs are being driven by population growth, urbanization and the challenge of meeting the Sustainable Development Goals. Climate change is also driving infrastructure needs by requiring the rapid replacement of carbon-emitting infrastructure and rebuilding infrastructure damaged through climate change-driven extreme weather events and sea-level rise.[^2] 
+
+Increasing private investment in infrastructure has been a goal of governments and international institutions such as the World Bank, OECD, and bilateral development banks.[^3] The World Bank’s Public Private Partnership Group has published a dataset of infrastructure projects that are either completely or partially privately funded.[^4] There is very little open data about privately funded projects compared with projects funded by governments, development banks, or aid agencies. The Private Participation in Infrastructure (PPI) Database stands out for the large number of projects and the depth of information available about each project. The World Bank has published reports analyzing the data through country, sector, and topical lenses, but does so at the country level.
+
+The dataset includes municipal and provincial governments’ projects, which allows for subnational infrastructure projects to be disaggregated to identify the characteristics of private investment below the national level. As this paper will show, private investment in local and provincial governments is different than in national governments, which makes disaggregated analysis crucial to accurately describing the financing landscape and finding opportunities for policymakers to make improvements in infrastructure financing.
+
+There are two major challenges that this landscape analysis hopes to inform. finding enough financing for badly needed infrastructure, and directing private investment into climate-resilient and low carbon infrastructure rather than high carbon-emitting infrastructure. For some projects, the data in the PPI Database is detailed enough to classify it as either low or high carbon, particularly for energy generation and transports, but others require more detail. The Public Private Partnership Group released a report in 2018 finding that there has been a partial shift towards renewables, primarily in the form of hydropower in energy, but road projects are still dominant in transport.[^5]
+
+#### Private Investment by Year
+```{r Investmetnt over time by government Level }
+data %>% 
+  rename(Year = `Financial closure year`) %>% 
+  group_by(Year, Government) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  ggplot(., mapping = aes(x=Year, y=PrivateInvestment, col=Government, group=Government)) + 
+  geom_line(size=2) +
+  scale_x_continuous(breaks = seq.int(1985, 2020, 5)) +
+  labs(subtitle = "Data for 2019 is through May",
+       y="Private Investment (Millions USD)",
+       colour="",
+       caption = "Data: World Bank PPI") +
+  scale_colour_viridis_d(option="C") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_classic()
+```
+
+The PPI database has 335,950 infrastructure projects that were done by either local/municipal or state/provincial governments. Even though the focus of this paper is municipal governments, state/provincial projects are included, but disaggregated because of the responsibilities of municipal and provincial governments vary between countries.
+
+Data for local governments go back to 1992, provincial governments to 1985, and national governments to 1930. This paper only looked at projects since 1992 to make comparisons between different government types. The vast majority of private investment goes to national governments. Private investment in local projects is growing, with a large uptick since 2010. Investment in State/Provincial infrastructure peaked in 2010 and has declined to a lower level than investment in local governments.
+
+#### Investment by Government Type
+```{r}
+data %>%
+  group_by(Government) %>% 
+  summarise(Projects =prettyNum(n(), big.mark = ","),
+            `Total Investment (Millions USD)` = prettyNum(sum(TotalInvestment, na.rm = T), big.mark = ",", digits=2),
+            `Private Investment (Millions USD)` = prettyNum(sum(PrivateInvestment, na.rm = T), big.mark = ",", digits=2),
+            `Percent of Private Investment` = paste0(round((sum(PrivateInvestment, na.rm = T)/sum(data$PrivateInvestment, na.rm=T))*100, digits = 1), "%")) %>%
+  kable(., align = c("l", "r", "r", "r", "r")) %>% 
+  kable_styling()
+```
+
+Data quality and completeness is a challenge, particularly when focused on local or municipal projects. The amount of missing data is lowest for national government projects and highest for local or municipal government projects.[^6]
+
+#### Data Quality 
+```{r}
+data %>%
+  group_by(Government) %>% 
+  summarize(a = prettyNum(n(), big.mark = ","),
+            b = prettyNum(sum(na_count), big.mark = ","),
+            c = round(sum(na_count)/n(), digits=1)) %>% 
+  arrange(c) %>% 
+  mutate(pctna = paste0((c/50)*100, "%")) %>% 
+  kable(.,col.names =c("Government Type", "Number of Projects", "Cells Missing Values", "Misssing Values Per Project", "Percent Missing"),
+        align = c("l", "r", "r", "r", "r")) %>% 
+  kable_styling()
+```
+
+The sectors included in the PPI Database are energy, information and communication technology, municipal solid waste, transport, and water and sewerage. Private investment into energy and transport accounts for over 90% of private investment. Private investment is that the majority of all financing for all sectors.
+
+#### Sector Summary
+```{r}
+
+data %>% group_by(`Primary sector`) %>% 
+  summarise(Projects = prettyNum(n(), big.mark = ","),
+            `Percent of Projects` = paste0(round((n()/nrow(data))*100, digits = 1), "%"),
+            `Total Investment (Millions USD)` = round(mean(TotalInvestment, na.rm = T), digits = 1),
+            `Private Investment (Millions USD)` = round(mean(PrivateInvestment, na.rm = T), digits=1),
+            `Percent of Private Investment` = paste0(round((sum(PrivateInvestment, na.rm = T)/sum(data$PrivateInvestment, na.rm=T))*100, digits = 1), "%"),
+            `Tota lDebt Funding (Millions USD)` = round(mean(TotalDebtFunding, na.rm = T), digits=1)) %>% 
+  kable(align = c("l", "r", "r", "r", "r", "r", "r")) %>% 
+  kable_styling()
+```
+
+## Project Types{.tabset .tabset-fade}
+
+The PPI Database classifies projects by Type, corresponding to greenfield, brownfield, management or lease contract or divestiture and subtype, which includes more information about the concession type.
+
+Build operate and transfer (BOT) is the most common type of concession for local governments, comprising 34.8% of all projects. The next most common is rehabilitate, operate and transfer, which only comprise 7.9%. For provincial governments, build, rehabilitate, operate, transfer of brownfield assets is the most common type of concession at 32.4%, followed by build, own, operate at 25.9% and build, operate, transfer at 21.5%.
+
+For time-limited concessions, the average length is `r round(mean(data$ContractPeriod, na.rm=T))` years and doesn’t vary between types of government. Permanent private ownership is least common for local governments.
+
+### Local/Municipal
+
+#### Project Types - Local/Municipal
+```{r Table 1}
+proj_types %>% 
+  filter(Government == "Local/Municipal",
+         is.na(`Subtype of PPI`) == F) %>%
+ dplyr::select(-Government) %>% 
+  kable(.) %>% 
+  kable_styling(., "striped", position = "left", font_size = 12) %>% 
+  footnote(general = paste("Removed", proj_types %>% filter(Government == "Local/Municipal", is.na(`Subtype of PPI`)) %>% .$Total %>% sum(.), "projects classified as Not Available."))
+```
+
+### State/Provincial
+
+#### Project Types - State/Provincial
+```{r }
+proj_types %>% 
+  filter(Government == "State/Provincial",
+         is.na(`Subtype of PPI`) == F) %>%
+ dplyr::select(-Government) %>% 
+  kable(.) %>% 
+  kable_styling(kable_input=., "striped", position = "left", font_size = 12) %>% 
+  footnote(general = paste("Removed", proj_types %>% filter(Government == "State/Provincial", is.na(`Subtype of PPI`)) %>% .$Total %>% sum(.), "projects classified as Not Available."))
+```
+
+### National
+
+#### Project Types - National
+```{r }
+proj_types %>% 
+  filter(Government == "National",
+         is.na(`Subtype of PPI`) == F) %>%
+ dplyr::select(-Government) %>% 
+  kable(.) %>% 
+  kable_styling(kable_input=., "striped", position = "left", font_size = 12) %>% 
+  footnote(general = paste("Removed", proj_types %>% filter(Government == "State/Provincial", is.na(`Subtype of PPI`)) %>% .$Total %>% sum(.), "projects classified as Not Available."))
+```
+
+
+# Private Investment by Sector
+
+Private investment is highly sector-specific. Energy receives the most private investment, followed by transport. Local governments stand out because their transport projects receive the most private investment, rather than energy. Water and waste management are significant sectors for local governments but negligible for the others. Water and sewerage and municipal solid waste are the only sectors where local governments receive more private investment than provincial or national governments.
+
+Each sector is split up into more detailed categories that are explored further below.
+
+## {.tabset .tabset-fade}
+
+### Local/Municipal
+
+#### Private Investment by Sector - Local/Municipal
+```{r}
+ggplot(data %>% filter(Government == "Local/Municipal"), mapping = aes(x = `Primary sector`, y=PrivateInvestment, fill=`Primary sector`)) + 
+  geom_col() +
+  scale_fill_viridis_d( aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment",
+       x = "Sector",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  guides(fill=FALSE) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position="bottom")
+
+```
+
+### State/Provincial
+
+#### Private Investment by Sector - State/Provincial
+```{r}
+ggplot(data %>% filter(Government == "State/Provincial"), mapping = aes(x = `Primary sector`, y=PrivateInvestment, fill=`Primary sector`)) + 
+  geom_col() +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "Sector",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  guides(fill=FALSE) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position="bottom")
+
+```
+
+### National
+
+#### Private Investment by Sector - National
+```{r}
+ggplot(data %>% filter(Government == "National"), mapping = aes(x = `Primary sector`, y=PrivateInvestment, fill=`Primary sector`)) + 
+  geom_col() +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "Sector",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  guides(fill=FALSE) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position="bottom")
+
+```
+
+
+## Energy{.tabset .tabset-fade}
+
+Energy is a significant sector for all levels of government, but they invest in very different technologies. Coal receives the most investment at the national and provincial levels but solar photovoltaics are the most invested in at the local level. The top four generation technologies receiving private investment at the local level are all renewables, though waste to energy and biomass can have harmful local polluting effects and are not carbon neutral.
+
+One of the most notable aspects of energy generation is a massive spike in private investment in coal at the provincial level.
+
+### Local/Municipal
+
+#### Top 5 Energy Generation Technologies - Local/Municipal
+```{r}
+
+em <- data %>% 
+  filter(Government %in% c("Local/Municipal"),
+         Subsector == "Electricity",
+         is.na(Technology) == F) %>% 
+  group_by(Technology, Government) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  arrange(-PrivateInvestment) %>% 
+  ungroup() %>% 
+  top_n(n=5) %>% 
+  mutate(clean = ifelse(Technology %in% c("Coal", "Diesel", "Natural Gas","Natural Gas, Hydro, Large (>50MW)", "Diesel, Hydro, Large (>50MW)"), "Fossil Fuels", "Renewable")) %>% 
+  filter()
+
+ggplot(em, mapping = aes(x=reorder(Technology, -PrivateInvestment), y=PrivateInvestment, fill=clean)) +
+  geom_col() +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "Technology",
+       fill = " ",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+#### Energy Generation Investment by Year - Local/Municipal
+```{r}
+data %>% 
+  filter(Government %in% c("Local/Municipal"),
+         Subsector == "Electricity",
+         Technology %in% em$Technology,
+         is.na(PrivateInvestment) == F) %>%
+  group_by(Technology, InvestmentYear) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  ggplot(., mapping = aes(x=InvestmentYear, y=PrivateInvestment, col=Technology, group=Technology)) +
+  geom_line(size=1) +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(subtitle = "2019 data is through May.",
+       y = "Private Investment (Millions USD)",
+       x = "Year",
+       col = "",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+### State/Provincial
+
+#### Top 5 Energy Generation Technologies - State/Provincial
+```{r}
+ep <- data %>% 
+  filter(Government %in% c("State/Provincial"),
+         Subsector == "Electricity",
+         is.na(Technology) == F) %>% 
+  group_by(Technology, Government) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  arrange(-PrivateInvestment) %>% 
+  ungroup() %>% 
+  top_n(n=5) %>% 
+  mutate(clean = ifelse(Technology %in% c("Coal", "Diesel", "Natural Gas","Natural Gas, Hydro, Large (>50MW)", "Diesel, Hydro, Large (>50MW)"), "Fossil Fuels", "Renewable"))
+
+ggplot(ep, mapping = aes(x=reorder(Technology, -PrivateInvestment), y=PrivateInvestment, fill=clean)) +
+  geom_col() +
+  scale_fill_viridis_d( aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "Technology",
+       fill = " ",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+#### Energy Generation Investment by Year - State/Provincial
+```{r}
+data %>% 
+  filter(Government %in% c("State/Provincial"),
+         Subsector == "Electricity",
+         Technology %in% ep$Technology,
+         is.na(PrivateInvestment) == F) %>%
+  group_by(Technology, InvestmentYear) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  ggplot(., mapping = aes(x=InvestmentYear, y=PrivateInvestment, col=Technology, group=Technology)) +
+  geom_line(size=1) +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(subtitle = "2019 data is through May.",
+       y = "Private Investment (Millions USD)",
+       x = "Year",
+       col = "",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+### National
+
+#### Top 5 Energy Generation Technologies - National
+```{r }
+en <- data %>% 
+  filter(Government %in% c("National"),
+         Subsector == "Electricity",
+         is.na(Technology) == F) %>% 
+  group_by(Technology) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  arrange(-PrivateInvestment) %>% 
+  ungroup() %>% 
+  top_n(n=5) %>% 
+  mutate(clean = ifelse(Technology %in% c("Coal", "Diesel", "Natural Gas","Natural Gas, Hydro, Large (>50MW)", "Diesel, Hydro, Large (>50MW)"), "Fossil Fuels", "Renewable"))
+
+ggplot(en, mapping = aes(x=reorder(Technology, -PrivateInvestment), y=PrivateInvestment, fill=clean)) +
+  geom_col() +
+  scale_fill_viridis_d( aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "Technology",
+       fill = " ",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+#### Energy Generation Investment by Year - National
+```{r}
+data %>% 
+  filter(Government %in% c("National"),
+         Subsector == "Electricity",
+         Technology %in% en$Technology,
+         is.na(PrivateInvestment) == F) %>%
+  group_by(Technology, InvestmentYear) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  ggplot(., mapping = aes(x=InvestmentYear, y=PrivateInvestment, col=Technology, group=Technology)) +
+  geom_line(size=1) +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(subtitle = "2019 data is through May.",
+       y = "Private Investment (Millions USD)",
+       x = "Technology",
+       col = "",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+##
+
+## Transport {.tabset .tabset-fade}
+
+All transportation investment is dominated by highways. Local governments had the largest share of investment rail. 24% of private investment went to local passenger rail, while 15% did for provincial governments and less than 4% for national governments. There is no category for road-based public transport like bus rapid transit (BRT) so it is unclear whether any of the road spending could be considered low carbon. Air travel is the most carbon-intensive form of transportation, and airports are the second-highest facility type for private investment at the national level, accounting for over 20% of private investment.
+
+Local government transport projects are significantly more reliant on debt capital than provincial or national government projects. Provincial government projects are the smallest and national projects are the largest, with local projects falling in between.
+
+#### Average Transport Project Financing Size
+```{r}
+data %>% group_by(Government, `Primary sector`) %>% 
+  summarise(Projects = n(),
+            `Total Investment` = mean(TotalInvestment, na.rm = T),
+            `Private Investment` = mean(PrivateInvestment, na.rm = T),
+            `Debt Funding` = mean(TotalDebtFunding, na.rm = T)) %>% 
+  pivot_longer(cols=`Total Investment`:`Debt Funding`) %>% 
+  filter(`Primary sector` == "Transport") %>% 
+  ggplot(funding_sum, mapping = aes(x=Government, y=value, fill=name)) +
+  geom_col(position = "dodge") +
+  scale_fill_viridis_d( aesthetics = c("colour", "fill"), option = "C") +
+  labs(x="",
+       y="Average Amount (millions USD)",
+       fill = "Financing type",
+       caption = "Data: Wordbank PPI") +
+  theme_classic()
+
+```
+
+### Local/Municipal
+
+#### Transport Facility Types - Local/Municipal
+```{r}
+data %>% 
+  filter(Government %in% c("Local/Municipal"),
+         `Primary sector` == "Transport",
+         is.na(Segment) == F) %>% 
+  group_by(Subsector, Government) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  ggplot(., mapping = aes(x=reorder(Subsector, -PrivateInvestment), y=PrivateInvestment, fill=Subsector)) +
+  geom_col() +
+  scale_fill_viridis_d( aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  theme_classic() +
+  guides(fill=F)
+
+```
+
+```{r}
+data %>% 
+  filter(Government %in% c("Local/Municipal"),
+         `Primary sector` == "Transport",
+         is.na(Segment) == F) %>% 
+  mutate(total_private_invest = sum(PrivateInvestment, na.rm = T)) %>% 
+  group_by(Segment, Subsector, Government) %>% 
+  summarise(Projects = n(),
+            `Private Investment (Millions USD)` = sum(PrivateInvestment, na.rm = T),
+             Percent = paste0(round(100*sum(PrivateInvestment, na.rm = T)/first(total_private_invest), digits = 2), "%")) %>% 
+ dplyr::select(-Government) %>% 
+  filter(Percent > 1) %>% 
+  arrange(-`Private Investment (Millions USD)`) %>% 
+  mutate(`Private Investment (Millions USD)` = prettyNum(`Private Investment (Millions USD)`, big.mark = ",", digits = 2)) %>% 
+  kable(align = c("l", "l", "r", "r")) %>% 
+  kable_styling() %>% 
+  footnote(general = "Removed 6 segment types that received less than 1% of transport investment.")
+```
+
+
+### State/Provincial
+
+#### Transport Facility Types - State/Provincial
+```{r}
+data %>% 
+  filter(Government %in% c("State/Provincial"),
+         `Primary sector` == "Transport") %>% 
+  group_by(Subsector, Government) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  # ungroup() %>% 
+  # top_n(n=5)%>% 
+  ggplot(., mapping = aes(x=reorder(Subsector, -PrivateInvestment), y=PrivateInvestment, fill=Subsector)) +
+  geom_col() +
+  scale_fill_viridis_d( aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  theme_classic() +
+  guides(fill=F)
+
+```
+
+```{r}
+data %>% 
+  filter(Government %in% c("State/Provincial"),
+         `Primary sector` == "Transport",
+         is.na(Segment) == F) %>% 
+  mutate(total_private_invest = sum(PrivateInvestment, na.rm = T)) %>% 
+  group_by(Segment, Subsector, Government) %>% 
+  summarise(Projects = n(),
+            `Private Investment (Millions USD)` = sum(PrivateInvestment, na.rm = T),
+             Percent = paste0(round(100*sum(PrivateInvestment, na.rm = T)/first(total_private_invest), digits = 2), "%")) %>% 
+ dplyr::select(-Government) %>% 
+  filter(Percent > 1) %>% 
+  arrange(-`Private Investment (Millions USD)`) %>% 
+  mutate(`Private Investment (Millions USD)` = prettyNum(`Private Investment (Millions USD)`, big.mark = ",", digits = 2)) %>% 
+  kable(align = c("l", "l", "r", "r")) %>% 
+  kable_styling() %>% 
+  footnote(general = "Removed 7 segment types that received less than 1% of transport investment.")
+```
+
+### National
+
+#### Transport Facility Types - National
+```{r}
+data %>% 
+  filter(Government %in% c("National"),
+         `Primary sector` == "Transport",
+         is.na(Segment) == F) %>% 
+  group_by(Subsector, Government) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  # ungroup() %>% 
+  # top_n(n=5) %>% 
+  ggplot(., mapping = aes(x=reorder(Subsector, -PrivateInvestment), y=PrivateInvestment, fill=Subsector)) +
+  geom_col() +
+  scale_fill_viridis_d( aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  theme_classic() +
+  guides(fill=F)
+
+```
+
+```{r}
+data %>% 
+  filter(Government %in% c("National"),
+         `Primary sector` == "Transport",
+         is.na(Segment) == F) %>% 
+  mutate(total_private_invest = sum(PrivateInvestment, na.rm = T)) %>% 
+  group_by(Segment, Subsector, Government) %>% 
+  summarise(Projects = n(),
+            `Private Investment (Millions USD)` = sum(PrivateInvestment, na.rm = T),
+             Percent = paste0(round(100*sum(PrivateInvestment, na.rm = T)/first(total_private_invest), digits = 2), "%")) %>% 
+ dplyr::select(-Government) %>% 
+  filter(Percent > 1) %>% 
+  arrange(-`Private Investment (Millions USD)`) %>% 
+  mutate(`Private Investment (Millions USD)` = prettyNum(`Private Investment (Millions USD)`, big.mark = ",", digits = 2)) %>% 
+  kable(align = c("l", "l", "r", "r")) %>% 
+  kable_styling() %>% 
+  footnote(general = "Removed 13 segment types that received less than 1% of transport investment.")
+```
+
+## Water and Sewerage {.tabset .tabset-fade}
+
+Total investment in water and sewerage is highest at the local government level and lowest for national governments. Projects are classified as either in water utilities, treatment plants, or combined water utility and treatment plants. Water utilities receive the most private investment
+
+Despite the majority of private investment going to local government projects, they have the smallest average size when looking at either total investment or private investment. National government projects are the largest.
+
+#### Average Water and Sewerage Project Financing Size
+```{r}
+data %>% group_by(Government, `Primary sector`) %>% 
+  summarise(Projects = n(),
+            `Total Investment` = mean(TotalInvestment, na.rm = T),
+            `Private Investment` = mean(PrivateInvestment, na.rm = T),
+            `Debt Funding` = mean(TotalDebtFunding, na.rm = T)) %>% 
+  pivot_longer(cols=`Total Investment`:`Debt Funding`) %>% 
+  filter(`Primary sector` == "Water and sewerage") %>% 
+  ggplot(funding_sum, mapping = aes(x=Government, y=value, fill=name)) +
+  geom_col(position = "dodge") +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(x="",
+       y="Average Amount (millions USD)",
+       fill = "Financing type",
+       caption = "Data: Wordbank PPI") +
+  theme_classic()
+
+```
+
+### Local/Municipal
+
+#### Water and Sewerage Facility Types - Local/Municipal
+```{r}
+
+wsm <- data %>% 
+  filter(Government %in% c("Local/Municipal"),
+         `Primary sector` == "Water and sewerage",
+         is.na(Segment) == F) %>% 
+  group_by(Segment, Subsector) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  arrange(-PrivateInvestment) %>% 
+  ungroup() %>% 
+  top_n(n=10) %>% 
+  #mutate(clean = ifelse(Technology %in% c("Coal", "Diesel", "Natural Gas","Natural Gas, Hydro, Large (>50MW)", "Diesel, Hydro, Large (>50MW)"), "Fossil Fuels", "Renewable")) %>% 
+  filter()
+
+ggplot(wsm, mapping = aes(x=reorder(Segment, -PrivateInvestment), y=PrivateInvestment, fill=Subsector)) +
+  geom_col() +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "Technology",
+       fill = " ",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+#### Water and Sewerage Investment by Year - Local/Municipal
+```{r}
+data %>% 
+  filter(Government %in% c("Local/Municipal"),
+         `Primary sector` == "Water and sewerage",
+         Segment %in% wsm$Segment,
+         is.na(PrivateInvestment) == F) %>%
+  group_by(Segment, InvestmentYear) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  ggplot(., mapping = aes(x=InvestmentYear, y=PrivateInvestment, col=Segment, group=Segment)) +
+  geom_line(size=1) +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(subtitle = "2019 data is through May.",
+       y = "Private Investment (Millions USD)",
+       x = "Year",
+       col = "",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+### State/Provincial
+
+#### Water and Sewerage Facility Types - State/Provincial
+```{r}
+wsp <- data %>% 
+  filter(Government %in% c("State/Provincial"),
+         `Primary sector` == "Water and sewerage",
+         is.na(Segment) == F) %>% 
+  group_by(Segment, Subsector) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  arrange(-PrivateInvestment) %>% 
+  ungroup() %>% 
+  top_n(n=10) %>% 
+  #mutate(clean = ifelse(Technology %in% c("Coal", "Diesel", "Natural Gas","Natural Gas, Hydro, Large (>50MW)", "Diesel, Hydro, Large (>50MW)"), "Fossil Fuels", "Renewable")) %>% 
+  filter()
+
+ggplot(wsp, mapping = aes(x=reorder(Segment, -PrivateInvestment), y=PrivateInvestment, fill=Subsector)) +
+  geom_col() +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "Technology",
+       fill = " ",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+#### Water and Sewerage Investment by Year - State/Provincial
+```{r}
+data %>% 
+  filter(Government %in% c("State/Provincial"),
+         `Primary sector` == "Water and sewerage",
+         Segment %in% wsp$Segment,
+         is.na(PrivateInvestment) == F) %>%
+  group_by(Segment, InvestmentYear) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  ggplot(., mapping = aes(x=InvestmentYear, y=PrivateInvestment, col=Segment, group=Segment)) +
+  geom_line(size=1) +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(subtitle = "2019 data is through May.",
+       y = "Private Investment (Millions USD)",
+       x = "Year",
+       col = "",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+### National
+
+#### Water and Sewerage Facility Types - National
+```{r }
+wsn <- data %>% 
+  filter(Government %in% c("National"),
+         `Primary sector` == "Water and sewerage",
+         is.na(Segment) == F) %>% 
+  group_by(Segment, Subsector) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  arrange(-PrivateInvestment) %>% 
+  ungroup() %>% 
+  top_n(n=10) %>% 
+  #mutate(clean = ifelse(Technology %in% c("Coal", "Diesel", "Natural Gas","Natural Gas, Hydro, Large (>50MW)", "Diesel, Hydro, Large (>50MW)"), "Fossil Fuels", "Renewable")) %>% 
+  filter()
+
+ggplot(wsn, mapping = aes(x=reorder(Segment, -PrivateInvestment), y=PrivateInvestment, fill=Subsector)) +
+  geom_col() +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "Technology",
+       fill = " ",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+#### Water and Sewerage Investment by Year - National
+```{r}
+data %>% 
+  filter(Government %in% c("National"),
+         `Primary sector` == "Water and sewerage",
+         Segment %in% wsn$Segment,
+         is.na(PrivateInvestment) == F) %>%
+  group_by(Segment, InvestmentYear) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  ggplot(., mapping = aes(x=InvestmentYear, y=PrivateInvestment, col=Segment, group=Segment)) +
+  geom_line(size=1) +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(subtitle = "2019 data is through May.",
+       y = "Private Investment (Millions USD)",
+       x = "Year",
+       col = "",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+## Solid Waste{.tabset .tabset-fade}
+
+Local governments receive over 85% of private investment in solid waste projects. Treatment and disposal receive the most investment for all governments. Project size is similar for all types of government, but local government projects have higher levels of debt financing than the others.
+
+#### Average Water and Sewerage Project Financing Size
+```{r}
+data %>% group_by(Government, `Primary sector`) %>% 
+  summarise(Projects = n(),
+            `Total Investment` = mean(TotalInvestment, na.rm = T),
+            `Private Investment` = mean(PrivateInvestment, na.rm = T),
+            `Debt Funding` = mean(TotalDebtFunding, na.rm = T)) %>% 
+  pivot_longer(cols=`Total Investment`:`Debt Funding`) %>% 
+  filter(`Primary sector` == "Municipal Solid Waste") %>% 
+  ggplot(funding_sum, mapping = aes(x=Government, y=value, fill=name)) +
+  geom_col(position = "dodge") +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(x="",
+       y="Average Amount (Millions USD)",
+       fill = "Financing type",
+       caption = "Data: Wordbank PPI") +
+  theme_classic()
+
+```
+
+### Local/Municipal
+
+#### Solid Waste Facility Types - Local/Municipal
+```{r}
+
+wm <- data %>% 
+  filter(Government %in% c("Local/Municipal"),
+         `Primary sector` == "Municipal Solid Waste",
+         is.na(Subsector) == F) %>% 
+  group_by(Subsector) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  arrange(-PrivateInvestment) %>% 
+  ungroup() %>% 
+  top_n(n=10) %>% 
+  filter()
+
+ggplot(wm, mapping = aes(x=reorder(Subsector, -PrivateInvestment), y=PrivateInvestment, fill=Subsector)) +
+  geom_col() +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "Technology",
+       fill = " ",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+#### Water and Sewerage Investment by Year - Local/Municipal
+```{r}
+data %>% 
+  filter(Government %in% c("Local/Municipal"),
+         `Primary sector` == "Municipal Solid Waste",
+         is.na(PrivateInvestment) == F) %>%
+  group_by(Subsector, InvestmentYear) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  ggplot(., mapping = aes(x=InvestmentYear, y=PrivateInvestment, col=Subsector, group=Subsector)) +
+  geom_line(size=1) +
+  scale_fill_viridis_d( aesthetics = c("colour", "fill"), option = "C") +
+  labs(subtitle = "2019 data is through May.",
+       y = "Private Investment (Millions USD)",
+       x = "Year",
+       col = "",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+### State/Provincial
+
+#### Solid Waste Facility Types - State/Provincial
+```{r}
+wp <- data %>% 
+  filter(Government %in% c("State/Provincial"),
+         `Primary sector` == "Municipal Solid Waste",
+         is.na(Subsector) == F) %>% 
+  group_by(Subsector) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  arrange(-PrivateInvestment) %>% 
+  ungroup() %>% 
+  top_n(n=10) %>% 
+  filter()
+
+ggplot(wp, mapping = aes(x=reorder(Subsector, -PrivateInvestment), y=PrivateInvestment, fill=Subsector)) +
+  geom_col() +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "Technology",
+       fill = " ",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+#### Water and Sewerage Investment by Year - State/Provincial
+```{r}
+data %>% 
+  filter(Government %in% c("State/Provincial"),
+        `Primary sector` == "Municipal Solid Waste",
+         is.na(PrivateInvestment) == F) %>%
+  group_by(Subsector, InvestmentYear) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  ggplot(., mapping = aes(x=InvestmentYear, y=PrivateInvestment, col=Subsector, group=Subsector)) +
+  geom_line(size=1) +
+  scale_fill_viridis_d( aesthetics = c("colour", "fill"), option = "C") +
+  labs(subtitle = "2019 data is through May.",
+       y = "Private Investment (Millions USD)",
+       x = "Year",
+       col = "",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+### National
+
+#### Top 10 Solid Waste Facility Types - National
+```{r }
+wn <- data %>% 
+  filter(Government %in% c("National"),
+         `Primary sector` == "Municipal Solid Waste",
+         is.na(Subsector) == F) %>% 
+  group_by(Subsector) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  arrange(-PrivateInvestment) %>% 
+  ungroup() %>% 
+  top_n(n=10) %>% 
+  filter()
+
+ggplot(wn, mapping = aes(x=reorder(Subsector, -PrivateInvestment), y=PrivateInvestment, fill=Subsector)) +
+  geom_col() +
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  labs(y = "Private Investment (Millions USD)",
+       x = "Technology",
+       fill = " ",
+       caption = "Data: World Bank PPI") +
+  scale_y_continuous(labels = scales::comma) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+#### Water and Sewerage Investment by Year - National
+```{r}
+data %>% 
+  filter(Government %in% c("National"),
+        `Primary sector` == "Municipal Solid Waste",
+         is.na(PrivateInvestment) == F) %>%
+  group_by(Subsector, InvestmentYear) %>% 
+  summarise(PrivateInvestment = sum(PrivateInvestment, na.rm = T)) %>% 
+  ggplot(., mapping = aes(x=InvestmentYear, y=PrivateInvestment, col=Subsector, group=Subsector)) +
+  geom_line(size=1) +
+  scale_fill_viridis_d( aesthetics = c("colour", "fill"), option = "C") +
+  labs(subtitle = "2019 data is through May.",
+       y = "Private Investment (Millions USD)",
+       x = "Year",
+       col = "",
+       caption = "Data: World Bank PPI") +
+  theme_classic() +
+  theme(legend.position="bottom")
+```
+
+# Private Investment by Region
+
+Levels of investment by government type look very different by region. In particular, East Asia and the Pacific sees higher levels of investment in local/municipal governments. Almost 30% of private investment into the region goes to local governments, which is over four times higher than any other region. Subsaharan Africa is the region with the smallest share of private investment in local governments receiving only 0.4% of private investment.
+
+Governments in South Asia capture the highest share of private money flowing to state and provincial governments. They receive 48% of private investment while local governments that region only receive 2%. Europe and Central Asia, the Middle East and North Africa, East Asia and Pacific all receive less private investment into state/provincial governments than into local/municipal governments.
+
+There are no regions where national governments receive less than 50% of private investment.
+
+```{r}
+regions <- data %>% 
+  group_by(Region, Government) %>% 
+  summarise(`gov_invest` = sum(PrivateInvestment, na.rm = T)) %>% 
+  left_join(., data %>% group_by(Region) %>% summarise(RegionInvest= sum(PrivateInvestment, na.rm = T))) %>% 
+  mutate(`Percent of Regional Investment` = gov_invest/RegionInvest)
+```
+
+##  {.tabset .tabset-fade}
+
+### Local/Municipal
+
+####  Private Investment by Region - Local/Municipal
+```{r Local/Municipal}
+regions %>% filter(Government %in% c("Local/Municipal")) %>% 
+  ggplot(., mapping = aes(x=Region, y=`Percent of Regional Investment`, fill=Region, col=Region)) +
+  geom_col() + 
+  scale_fill_viridis_d(aesthetics = c("colour", "fill"), option = "C") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), breaks = c(.1, .2, .3, .4, .5, .6, .7, .8, .9, 1), limits = c(0, 1)) +
+  labs(caption = "Data: World Bank PPI") +
+  coord_flip() +
+  guides(fill=F, colour=F) +
+  theme_classic()
+```
+
+### State/Provincial
+
+#### Private Investment by Region - State/Provincial
+```{r State/Provincial}
+regions %>% filter(Government %in% c("State/Provincial")) %>% 
+  ggplot(., mapping = aes(x=Region, y=`Percent of Regional Investment`, fill=Region, col=Region)) +
+  geom_col() + 
+  scale_fill_viridis_d( aesthetics = c("colour", "fill"), option = "C") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), breaks = c(.1, .2, .3, .4, .5, .6, .7, .8, .9, 1), limits = c(0, 1)) +
+  labs(caption = "Data: World Bank PPI") +
+  coord_flip() +
+  guides(fill=F, colour=F) +
+  theme_classic()
+```
+
+### National
+
+#### Private Investment by Region - National
+```{r National}
+regions %>% filter(Government %in% c("National")) %>% 
+  ggplot(., mapping = aes(x=Region, y=`Percent of Regional Investment`, fill=Region, col=Region)) +
+  geom_col() + 
+  scale_fill_viridis_d( aesthetics = c("colour", "fill"), option = "C") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), breaks = c(.1, .2, .3, .4, .5, .6, .7, .8, .9, 1), limits = c(0, 1)) +
+  labs(caption = "Data: World Bank PPI") +
+  coord_flip() +
+  guides(fill=F, colour=F) +
+  theme_classic()
+```
+
+
+# Private Sponsors
+
+Every project in the PPI Database has sponsors which are “private entities that together have an equity participation of at least 20% in the project contract for Greenfields, brownfields, and management and lease contracts, and 5% for divestitures.”[^7] Because the PPI Database only includes infrastructure projects with private participation, every project has private sponsors. The number of private sponsors involved in a project ranges from 1 to 4.
+
+The country that a sponsor is based in is recorded for most sponsors, which allows for the international aspect of private infrastructure investment to become visible. China, India, and Brazil, which dominate private investment have interesting differences. China has the most sponsors headquartered there at the local level, and the top sponsors by investment at the local level are dominated by fifteen Chinese firms involved in solid waste, water and sewerage, and energy projects. The greatest number of sponsors involved at the state/provincial level are headquartered in India and eleven of the top firms by investment are Indian energy or transport companies. Brazil has the greatest number of sponsors active at the national level headquartered in it. Seven Brazilian firms are in the top 20 by investment, outnumbered by firms from wealthy countries like the United States, France, Spain, Italy, and Portugal.
+
+```{r}
+sponsors <- str_split(data$Sponsors, ", \n")
+
+sponsor_data <- data.frame(name = str_remove(str_remove(str_extract(sponsors, "^[A-Za-z0-9 &./]+"), " $"), "^ "),
+                           country = str_remove(str_extract(sponsors, "/ [A-Za-z,. ]+"), "^/ ")) %>% 
+  mutate(country = ifelse(country == "..", NA, 
+                          ifelse(country == "Not Available", NA, as.character(country)))) %>% 
+  filter(is.na(name) == F) %>% 
+  group_by(name) %>% 
+  summarise(country = first(na.omit(country)),
+            proj_count = n())
+
+sponsors_join <- data %>% 
+  mutate(sp1 = sapply(str_split(Sponsors, ", \n"), "[", 1),
+         sp2 = sapply(str_split(Sponsors, ", \n"), "[", 2),
+         sp3 = sapply(str_split(Sponsors, ", \n"), "[", 3),
+         sp4 = sapply(str_split(Sponsors, ", \n"), "[", 4)) %>% 
+  mutate(sp1_name = str_remove(str_remove(str_extract(sp1, "^[A-Za-z0-9 &./]+"), " $"), "^ "),
+         sp2_name = str_remove(str_remove(str_extract(sp2, "^[A-Za-z0-9 &./]+"), " $"), "^ "),
+         sp3_name = str_remove(str_remove(str_extract(sp3, "^[A-Za-z0-9 &./]+"), " $"), "^ "),
+         sp4_name = str_remove(str_remove(str_extract(sp4, "^[A-Za-z0-9 &./]+"), " $"), "^ ")) %>% 
+  mutate(sp1_share = as.numeric(str_remove(str_extract(sp1, "[0-9]*%"), "%")),
+         sp2_share = as.numeric(str_remove(str_extract(sp2, "[0-9]*%"), "%"))*10e-3*`Total Equity`,
+         sp3_share = as.numeric(str_remove(str_extract(sp3, "[0-9]*%"), "%"))*10e-3*`Total Equity`,
+         sp4_share = as.numeric(str_remove(str_extract(sp4, "[0-9]*%"), "%"))*10e-3*`Total Equity`) %>% 
+  mutate(sp1_country = str_remove(str_extract(sp1, "/ [A-Za-z,. ]+"), "^/ "),
+         sp2_country = str_remove(str_extract(sp2, "/ [A-Za-z,. ]+"), "^/ "),
+         sp3_country = str_remove(str_extract(sp3, "/ [A-Za-z,. ]+"), "^/ "),
+         sp4_country = str_remove(str_extract(sp4, "/ [A-Za-z,. ]+"), "^/ ")) %>% 
+  mutate(total_invest = case_when(is.na(PrivateInvestment) == FALSE ~ PrivateInvestment,
+                                  is.na(TotalInvestment) == FALSE ~ TotalInvestment,
+                                  is.na(`Total Equity`) == FALSE ~ `Total Equity`,
+                                  is.na(FeesToGovernment) == FALSE ~ FeesToGovernment,
+                                  is.na(PhysicalAssets) == FALSE ~ PhysicalAssets))
+
+sponsor_investments <- rbind(data.frame(name = sponsors_join$sp1_name, 
+                                        share = sponsors_join$sp1_share, 
+                                        country=sponsors_join$sp1_country, 
+                                        total_invest = sponsors_join$total_invest, 
+                                        Government = sponsors_join$Government,
+                                        Sector = sponsors_join$`Primary sector`),
+             data.frame(name = sponsors_join$sp2_name,
+                        share = sponsors_join$sp2_share, 
+                        country=sponsors_join$sp2_country, 
+                        total_invest = sponsors_join$total_invest, 
+                        Government = sponsors_join$Government,
+                        Sector = sponsors_join$`Primary sector`),
+             data.frame(name = sponsors_join$sp3_name,share = sponsors_join$sp3_share, 
+                        country=sponsors_join$sp3_country, 
+                        total_invest = sponsors_join$total_invest, 
+                        Government = sponsors_join$Government,
+                        Sector = sponsors_join$`Primary sector`),
+             data.frame(name = sponsors_join$sp4_name,
+                        share = sponsors_join$sp4_share, 
+                        country=sponsors_join$sp4_country, 
+                        total_invest = sponsors_join$total_invest, 
+                        Government = sponsors_join$Government,
+                        Sector = sponsors_join$`Primary sector`))%>% 
+  mutate(name = str_remove_all(name, "\\."),
+         country = ifelse(country == "..", NA, 
+                          ifelse(country == "Not Available", NA, as.character(country))),
+         country = ifelse(is.na(country)==T, ifelse(str_detect(name, "China")==T, "China", country), country),
+         country = ifelse(is.na(country)==T, ifelse(str_detect(name, "Changshu")==T, "China", country), country),
+         country = ifelse(is.na(country)==T, ifelse(str_detect(name, "Beijing")==T, "China", country), country),
+         country = ifelse(is.na(country)==T, ifelse(str_detect(name, "Anhui")==T, "China", country), country),
+         country = ifelse(is.na(country)==T, ifelse(str_detect(name, "Hubei")==T, "China", country), country),
+         country = ifelse(is.na(country)==T, ifelse(str_detect(name, "Hunan")==T, "China", country), country),
+         country = ifelse(is.na(country)==T, ifelse(str_detect(name, "Lanzhou")==T, "China", country), country),
+         country = ifelse(is.na(country)==T, ifelse(str_detect(name, "A2Z")==T, "India", country), country)
+         ) %>% 
+  filter(is.na(name)==F,
+         name != "Others",
+         name != "Small local investors",
+         name != "Small international investors",
+         name != "T")%>% 
+  mutate(country = ifelse(country == "United States", "United States of America", country),
+         country = ifelse(country == "Russian Federation", "Russia", country),
+         country = ifelse(country == "Hong Kong, China", "China", country),
+         country = ifelse(country == "Egypt, Arab Rep.", "Egypt", country),
+         country = ifelse(country == "Korea, Dem. Rep.", "South Korea", country),
+         country = ifelse(country == "Korea, Rep.", "South Korea", country),
+         country = ifelse(country == "Iran, Islamic Rep.", "Iran", country),
+         country = ifelse(country == "Yemen, Rep.", "Yemen", country),
+         country = ifelse(country == "Congo, Dem. Rep.", "Democratic Republic of the Congo", country),
+         country = ifelse(country == "Congo, Rep.", "Republic of Congo", country),
+         country = ifelse(country == "Kyrgyz Republic.", "Kyrgyzstan", country),
+         country = ifelse(country == "Lao PDR", "Laos", country),
+         country = ifelse(country == "Macedonia, FYR", "Macedonia", country),
+         country = ifelse(country == "Guyana, CR", "Guyana", country),
+         country = ifelse(country == "Côte d'Ivoire", "Ivory Coast", country),
+         country = ifelse(country == "Guinea-Bissau", "Guinea Bissau", country),
+         country = ifelse(country == "Kyrgyz Republic", "Kyrgyzstan", country),
+         country = ifelse(country == "São Tomé and Principe", "Sao Tome and Principe", country),
+         country = ifelse(country == "Serbia", "Republic of Serbia", country),
+         country = ifelse(country == "Gambia, The", "Gambia", country),
+         country = ifelse(country == "Syrian Arab Republic", "Syria", country),
+         country = ifelse(country == "Timor-Leste", "East Timor", country),
+         country = ifelse(country == "Tanzania", "United Republic of Tanzania", country),
+         country = ifelse(country == "Venezuela, RB", "Venezuela", country),
+         country = ifelse(country == "West Bank and Gaza", "Palestine", country))%>% 
+  mutate(investment = share*0.01*total_invest) %>% 
+  group_by(name, Government) %>% 
+  summarise(country = first(na.omit(country)),
+            Sector = modal(Sector),
+            Investment = round(sum(share, na.rm = T)),
+            Projects = n()) %>% 
+  ungroup()
+
+sponsor_investments$country[sponsor_investments$name == "Water Supply Concession LLC"] <- "Russia"
+sponsor_investments$country[sponsor_investments$name == "Canvest Environmental Protection Group Company Limited"] <- "Hong Kong, China"
+sponsor_investments$country[sponsor_investments$name == "SUEZ/ENGIE"] <- "France"
+sponsor_investments$country[sponsor_investments$name == "Jan de Nul"] <- "Luxembourg"
+sponsor_investments$country[sponsor_investments$name == "Actis"] <- "United Kingdom"
+sponsor_investments$country[sponsor_investments$name == "Rocha Maritima SA"] <- "Brazil"
+sponsor_investments$country[sponsor_investments$name == "Mimsan Group"] <- "Turkey"
+sponsor_investments$country[sponsor_investments$name == "Penyao Environmental Protection Co"] <- "China"
+sponsor_investments$country[sponsor_investments$name == "Grupo Bal"] <- "Mexico"
+sponsor_investments$country[sponsor_investments$name == "OAK Utility Solutions & Development"] <- "Bahrain"
+sponsor_investments$country[sponsor_investments$name == "Xinkai Water Environment Investment Co"] <- "China"
+sponsor_investments$country[sponsor_investments$name == "Renova Energia SA"] <- "Brazil"
+sponsor_investments$country[sponsor_investments$name == "Anhui Guosheng Environmental Protection Energy Saving Technology Co"] <- "China"
+sponsor_investments$country[sponsor_investments$name == "Hanjer Biotech Energies Pvt Ltd"] <- "India"
+sponsor_investments$country[sponsor_investments$name == "Dongguan Dongqing Water Pollution Control Co"] <- "China"
+sponsor_investments$country[sponsor_investments$name == "Cargo Motors"] <- "South Africa"
+sponsor_investments$country[sponsor_investments$name == "Gama Holding"] <- "Turkey"
+sponsor_investments$country[sponsor_investments$name == "ArcelorMittal"] <- "Luxembourg"
+sponsor_investments$country[sponsor_investments$name == "First Solar"] <- "United States"
+sponsor_investments$country[sponsor_investments$name == "Sterlite Technologies"] <- "India"
+sponsor_investments$country[sponsor_investments$name == "Fotowatio Renewable Ventures"] <- "Spain"
+sponsor_investments$country[sponsor_investments$name == "Gansu Yinyin Capital Management Co"] <- "China"
+sponsor_investments$country[sponsor_investments$name == "Asja Ambiente Italia"] <- "Italy"
+sponsor_investments$country[sponsor_investments$name == "ArcelorMittal"] <- "Luxembourg"
+sponsor_investments$country[sponsor_investments$name == "ArcelorMittal"] <- "Luxembourg"
+sponsor_investments$country[sponsor_investments$name == "ArcelorMittal"] <- "Luxembourg"
+sponsor_investments$country[sponsor_investments$name == "ArcelorMittal"] <- "Luxembourg"
+
+sponsors_country <- sponsor_investments %>% 
+  group_by(country) %>% 
+  summarise(Sponsors = n(),
+            Investment = round(sum(Investment, na.rm = T))) %>% 
+  mutate(colourscale = log(Investment+1)) %>% 
+  left_join(countries, ., by=c("admin" = "country"))
+
+sponsors_country_sub <- sponsor_investments %>% 
+  filter(Government != "National") %>% 
+  group_by(country) %>% 
+  summarise(Sponsors = n(),
+            Investment = round(sum(Investment, na.rm = T))) %>% 
+  mutate(colourscale = log(Investment+1)) %>% 
+  left_join(countries, ., by=c("admin" = "country"))
+```
+
+##  {.tabset .tabset-fade}
+
+### Local/Municipal
+
+#### Location of Sponsor HQs - Local/Municipal
+```{r}
+sponsor_investments %>% 
+  filter(Government == "Local/Municipal") %>% 
+  group_by(country) %>% 
+  summarise(Sponsors = n(),
+            Projects = sum(Projects, na.rm = T),
+            Investment = round(sum(Investment, na.rm = T)))  %>% 
+  left_join(countries, ., by=c("admin" = "country"))%>% 
+  mutate(colourscale = factor(case_when(Sponsors > 100 ~ "Greater than 100",
+                                 between(Sponsors, 10, 100) ~ "10 to 100",
+                                 Sponsors < 10 ~ "Less than 10",
+                                 TRUE ~ "None"),
+                              levels = c("None", "Less than 10", "10 to 100", "Greater than 100"),
+                              ordered = T)) %>% 
+  ggplot(., mapping = aes(fill=colourscale)) + 
+  geom_sf(col="white", size=.05) +
+  scale_fill_viridis_d( aesthetics = c("fill", "colour"), option = "inferno") +
+  labs(caption = "Data: World Bank PPIAF, Natural Earth",
+       fill="") +
+  theme_void(base_size = 18) +
+  theme(legend.position = "bottom")
+```
+
+#### Top 20 Local/Municipal Sponsors
+```{r}
+sponsor_investments %>% 
+  filter(Government == "Local/Municipal",
+         Investment > 0) %>% 
+ dplyr::select(-Government) %>% 
+  arrange(-Investment) %>% 
+  rename(Name = name,
+         Country = country,
+         `Investment (Millions USD)` = Investment) %>% 
+  top_n(n=20) %>% 
+  kable() %>% 
+  kable_styling()
+```
+
+### State/Provincial
+
+#### Location of Sponsor HQs - State/Provincial
+```{r}
+sponsor_investments %>% 
+  filter(Government == "State/Provincial") %>% 
+  group_by(country) %>% 
+  summarise(Sponsors = n(),
+            Projects = sum(Projects, na.rm = T),
+            Investment = round(sum(Investment, na.rm = T)))  %>% 
+  left_join(countries, ., by=c("admin" = "country"))%>% 
+  mutate(colourscale = factor(case_when(Sponsors > 100 ~ "Greater than 100",
+                                 between(Sponsors, 10, 100) ~ "10 to 100",
+                                 Sponsors < 10 ~ "Less than 10",
+                                 TRUE ~ "None"),
+                              levels = c("None", "Less than 10", "10 to 100", "Greater than 100"),
+                              ordered = T)) %>% 
+  ggplot(., mapping = aes(fill=colourscale)) + 
+  geom_sf(col="white", size=.05) +
+  scale_fill_viridis_d( aesthetics = c("fill", "colour"), option = "inferno") +
+  labs(caption = "Data: World Bank PPIAF, Natural Earth",
+       fill="") +
+  theme_void(base_size = 18) +
+  theme(legend.position = "bottom")
+```
+
+#### Top 20 State/Provincial Sponsors
+```{r}
+sponsor_investments %>% 
+  filter(Government == "State/Provincial",
+         Investment > 0) %>% 
+ dplyr::select(-Government) %>% 
+  arrange(-Investment) %>% 
+  rename(Name = name,
+         Country = country,
+         `Investment (Millions USD)` = Investment) %>% 
+  top_n(n=20) %>% 
+  kable() %>% 
+  kable_styling()
+```
+
+### National
+
+#### Location of Sponsor HQs - National
+```{r}
+sponsor_investments %>% 
+  filter(Government == "National") %>% 
+  group_by(country) %>% 
+  summarise(Sponsors = n(),
+            Projects = sum(Projects, na.rm = T),
+            Investment = round(sum(Investment, na.rm = T)))  %>% 
+  left_join(countries, ., by=c("admin" = "country"))%>% 
+  mutate(colourscale = factor(case_when(Sponsors > 100 ~ "Greater than 100",
+                                 between(Sponsors, 10, 100) ~ "10 to 100",
+                                 Sponsors < 10 ~ "Less than 10",
+                                 TRUE ~ "None"),
+                              levels = c("None", "Less than 10", "10 to 100", "Greater than 100"),
+                              ordered = T)) %>% 
+  ggplot(., mapping = aes(fill=colourscale)) + 
+  geom_sf(col="white", size=.05) +
+  scale_fill_viridis_d( aesthetics = c("fill", "colour"), option = "inferno") +
+  labs(caption = "Data: World Bank PPIAF, Natural Earth",
+       fill="") +
+  theme_void(base_size = 18) +
+  theme(legend.position = "bottom")
+```
+
+#### Top 20 National Sponsors
+```{r}
+sponsor_investments %>% 
+  filter(Government == "National",
+         Investment > 0) %>% 
+  dplyr::select(-Government) %>% 
+  arrange(-Investment) %>% 
+  mutate(Investment = prettyNum(Investment, big.mark = ",")) %>% 
+  rename(Name = name,
+         Country = country,
+         `Investment (Millions USD)` = Investment) %>% 
+  top_n(n=20) %>% 
+  kable(align = c("l", "l", "l", "r", "r")) %>% 
+  kable_styling()
+```
+
+
+# Commercial Banks
+
+Overall, 10% of projects have debt financing from commercial banks, but local/municipal governments see the least for every sector. for local/municipal projects, transport has the highest rate of commercial debt financing at just over 3%. In contrast, at the state/provincial level over 18% of energy projects have commercial debt financing and over 22% of national level, solid waste projects do.
+
+The country of commercial banks is not recorded in the database, but whether they were national or international is included. As might be expected, the percentage of debt financing from international banks varies by country, but it also varies the level of government, indicating that access to domestic private debt capital is different for different types of government within the same country.
+
+```{r Create Bank DFs}
+com_bank_proj <- data %>% 
+  filter(CommercialProjectBanks == 1)
+  
+banks <- unique(unlist(str_split(com_bank_proj$ProjectBanks, ", ")))
+
+bank_data <- data.frame(name = sapply(strsplit(banks," \\(Commercial"), `[`, 1)) %>% 
+  filter(str_detect(banks, " \\(Commercial")) %>% 
+  mutate(name = str_remove(name, "Other "),
+         name = str_remove(name, "^\n  "),
+         name = str_remove(name, "^\n "),
+         name = str_remove(name, "^ "),
+         name = str_remove(name, " $")) %>% 
+  filter(!(name %in% c("Commercial Bank", "Commercial Bank N/A"))) %>% 
+  mutate(name = str_remove(name, "^Commercial Bank "),
+         name = str_remove(name, " \\([A-Za-z]*\\)")) %>% 
+  group_by(name) %>% 
+  summarise()
+
+proj_count <- c()
+for (bank in bank_data$name) {
+  x <- data %>% filter(str_detect(ProjectBanks, bank))
+  x <- nrow(x)
+  proj_count <- c(proj_count, x)
+}
+
+bank_data$proj_count <- proj_count
+
+bank_investments <- tibble(Name=c(NA), Type = c(NA), Project=c(NA), Year=c(NA), Debt=c(NA), .rows = 0)
+
+for (bank in bank_data$name) {
+  investments <- com_bank_proj %>% 
+    filter(str_detect(ProjectBanks, bank)) %>% 
+    mutate(Name = bank,
+           Project = ProjectName,
+           Year = `Financial closure year`,
+           Debt = as.numeric(
+             str_remove(
+               str_extract(
+                 str_extract(ProjectBanks, 
+                             paste0(bank, " \\([\\w /]* / \\$[0-9.]*")), 
+                 "\\$[0-9.]*"),
+               "\\$")),
+           Type = str_remove_all(
+             str_remove_all(
+               str_extract(
+                 str_extract(ProjectBanks, paste0(bank, " \\([\\w /]* / \\$[0-9.]*")),
+                 "\\/ [\\w]* \\/"),
+               "[:punct:]"),
+             " ")
+    ) %>% 
+   dplyr::select(Name, Type, Project, Year, Debt)
+  bank_investments <- rbind(bank_investments, investments) %>% 
+    filter(is.na(Debt) == F)
+}
+
+bank_investments <- com_bank_proj %>% 
+ dplyr::select(-ProjectBanks, -CommercialProjectBanks) %>% 
+  left_join(bank_investments, ., by=c("Project" = "ProjectName")) %>% 
+  mutate(bank_pct_debt = Debt/TotalDebtFunding) %>% 
+ dplyr::select(-TotalDebtFunding)
+
+bank_data <- bank_investments %>% 
+  group_by(Name, Government, `Primary sector`) %>% 
+  summarise(DebtCapital = sum(Debt, na.rm = T)) %>% 
+  left_join(bank_data, ., by=c("name" = "Name")) %>% 
+  filter(name != "")
+
+bank_data <- bank_data[order(bank_data$DebtCapital, decreasing = T),]
+
+bank_proj_country <- bank_investments%>% 
+  group_by(Country) %>% 
+  summarise(Projects =n(),
+            PrivateDebt = sum(Debt, na.rm = T),
+            colourscale = log(sum(Debt, na.rm = T)+1),
+            mean_leverage = mean(leverage_pct, na.rm = T),
+            max_leverage = max(leverage_pct, na.rm = T),
+            min_leverage = min(leverage_pct, na.rm= T)) %>% 
+  full_join(countries, ., by=c("admin" = "Country"))
+
+bank_proj_country_sub <- bank_investments %>% 
+  filter(Government != "National") %>% 
+  group_by(Country) %>% 
+  summarise(Projects =n(),
+            PrivateDebt = sum(Debt, na.rm = T),
+            colourscale = log(sum(Debt, na.rm = T)+1),
+            mean_leverage = mean(leverage_pct, na.rm = T),
+            max_leverage = max(leverage_pct, na.rm = T),
+            min_leverage = min(leverage_pct, na.rm= T)) %>% 
+  full_join(countries, ., by=c("admin" = "Country"))
+```
+
+#### Percent of Commercial Debt Capital from International Banks
+```{r}
+bank_investments %>% 
+  filter(Type != "") %>% 
+  group_by(Country, Type, Government) %>% 
+  summarise(Debt = sum(Debt, na.rm = T)) %>% 
+  pivot_wider(., id_cols = c("Country", "Government"), 
+              names_from = Type,
+  values_from = Debt) %>% 
+  mutate_all(~replace(., is.na(.), 0)) %>% 
+  mutate(pct_International = round(International/(Local+International)*100, digits=1)) %>% 
+  filter(vec_duplicate_detect(Country) == T) %>% 
+  dplyr::select(-International, -Local) %>% 
+  pivot_wider(id_cols = Country,
+              names_from = Government,
+              values_from = pct_International,
+              names_prefix = "Percent for ") %>% 
+  dplyr::select(Country, `Percent for Local/Municipal`, `Percent for State/Provincial`, `Percent for National`) %>% 
+  mutate(`Percent for Local/Municipal` = ifelse(is.na(`Percent for Local/Municipal`), NA, paste0(`Percent for Local/Municipal`, "%")),
+         `Percent for State/Provincial` = ifelse(is.na(`Percent for State/Provincial`), NA, paste0(`Percent for State/Provincial`, "%")),
+         `Percent for National` = ifelse(is.na(`Percent for National`), NA, paste0(`Percent for National`, "%"))) %>% 
+  kable(align = c("l", "r", "r", "r")) %>% 
+  kable_styling()
+```
+
+##  {.tabset .tabset-fade}
+
+### Local/Municipal
+```{r}
+data %>% 
+  filter(Government == "Local/Municipal") %>% 
+  group_by(`Primary sector`) %>% 
+  summarise(`Total Projects`=n(),
+            `Projects with Commercial Debt Financing`=sum(ifelse(CommercialProjectBanks == 1, 1,0))) %>% 
+  mutate(`Percent` = paste0(round(100*`Projects with Commercial Debt Financing`/`Total Projects`, digits=2), "%")) %>% 
+  kable(align = c("l", "r", "r", "r")) %>% 
+  kable_styling()
+  
+```
+
+#### Share of International Commercial Debt Financing - Local/Municipal
+```{r}
+bank_investments %>% 
+  filter(Government == "Local/Municipal",
+         Type != "") %>% 
+  group_by(Country, Type) %>% 
+  summarise(Debt = sum(Debt, na.rm = T)) %>% 
+  pivot_wider(., id_cols = Country, names_from = Type,
+  values_from = Debt) %>% 
+  mutate_all(~replace(., is.na(.), 0)) %>% 
+  mutate(pct_International = International/(Local+International)*100) %>% 
+  full_join(countries, ., by=c("admin" = "Country")) %>% 
+  ggplot(., mapping = aes(fill=pct_International)) +
+  geom_sf(col="white", size=.05) +
+  scale_fill_viridis_c( aesthetics = c("fill", "colour"), option = "inferno") +
+  labs(caption = "Data: World Bank PPIAF, Natural Earth",
+       fill="") +
+  theme_void(base_size = 18) +
+  theme(legend.position = "bottom")
+```
+
+### State/Provincial
+```{r}
+data %>% 
+  filter(Government == "State/Provincial") %>% 
+  group_by(`Primary sector`) %>% 
+  summarise(`Total Projects`=n(),
+            `Projects with Commercial Debt Financing`=sum(ifelse(CommercialProjectBanks == 1, 1,0))) %>% 
+  mutate(`Percent` = paste0(round(100*`Projects with Commercial Debt Financing`/`Total Projects`, digits=2), "%")) %>% 
+  kable(align = c("l", "r", "r", "r")) %>% 
+  kable_styling()
+```
+
+#### Share of International Commercial Debt Financing - State/Provincial
+```{r}
+bank_investments %>% 
+  filter(Government == "State/Provincial",
+         Type != "") %>% 
+  group_by(Country, Type) %>% 
+  summarise(Debt = sum(Debt, na.rm = T)) %>% 
+  pivot_wider(., id_cols = Country, names_from = Type,
+  values_from = Debt) %>% 
+  mutate_all(~replace(., is.na(.), 0)) %>% 
+  mutate(pct_International = International/(Local+International)*100) %>% 
+  full_join(countries, ., by=c("admin" = "Country")) %>% 
+  ggplot(., mapping = aes(fill=pct_International)) +
+  geom_sf(col="white", size=.05) +
+  scale_fill_viridis_c( aesthetics = c("fill", "colour"), option = "inferno") +
+  labs(caption = "Data: World Bank PPIAF, Natural Earth",
+       fill="") +
+  theme_void(base_size = 18) +
+  theme(legend.position = "bottom")
+```
+
+### National
+```{r}
+data %>% 
+  filter(Government == "National") %>% 
+  group_by(`Primary sector`) %>% 
+  summarise(`Total Projects`=n(),
+            `Projects with Commercial Debt Financing`=sum(ifelse(CommercialProjectBanks == 1, 1,0))) %>% 
+  mutate(`Percent` = paste0(round(100*`Projects with Commercial Debt Financing`/`Total Projects`, digits=2), "%"),
+         `Total Projects` = prettyNum(`Total Projects`, big.mark = ",")) %>% 
+  kable(align = c("l", "r", "r", "r")) %>% 
+  kable_styling()
+```
+
+#### Share of International Commercial Debt Financing - National
+```{r}
+bank_investments %>% 
+  filter(Government == "National",
+         Type != "") %>% 
+  group_by(Country, Type) %>% 
+  summarise(Debt = sum(Debt, na.rm = T)) %>% 
+  pivot_wider(., id_cols = Country, names_from = Type,
+  values_from = Debt) %>% 
+  mutate_all(~replace(., is.na(.), 0)) %>% 
+  mutate(pct_International = International/(Local+International)*100) %>% 
+  full_join(countries, ., by=c("admin" = "Country")) %>% 
+  ggplot(., mapping = aes(fill=pct_International)) +
+  geom_sf(col="white", size=.05) +
+  scale_fill_viridis_c( aesthetics = c("fill", "colour"), option = "inferno") +
+  labs(caption = "Data: World Bank PPIAF, Natural Earth",
+       fill="") +
+  theme_void(base_size = 18) +
+  theme(legend.position = "bottom")
+```
+
+# Appendix 1: Country Summaries
+
+```{r Country Summary table}
+left_join(as.data.frame(proj_country) %>%dplyr::select(admin, Projects, local, provincial, PrivateInvestment), 
+               as.data.frame(sponsors_country) %>%dplyr::select(admin, Sponsors, Investment)) %>% 
+  left_join(., as.data.frame(bank_proj_country) %>%dplyr::select(admin, Projects, PrivateDebt) %>% rename(BankProj = Projects)) %>% 
+  filter(is.na(Projects) == F) %>% 
+  mutate(PrivateInvestment = prettyNum(round(PrivateInvestment), big.mark = ","),
+         Investment = prettyNum(round(Investment), big.mark = ","),
+         PrivateDebt = prettyNum(round(PrivateDebt), big.mark = ",")) %>%
+  mutate_all(~replace(., is.na(.), 0)) %>% 
+  kable(., col.names = c("Country", "Total Projects", "Local/Municipal Projects", "State/Provincial Projects", "Private Investment (Millions USD)", "Sponsors", "Sponsor Investment (Millions USD)", "Commercial Bank Financed Projects", "Commercial Debt Financing (Millions USD)"),
+        align = c("l", "r", "r", "r", "r", "r", "r", "r", "r")) %>% 
+  kable_styling()
+
+
+```
+
+# Appendix 2: Interactive Map of Private Subnational Infrastructure Investment
+
+```{r Interactive Map}
+pal_proj <- colorNumeric("viridis", domain= proj_country_sub$PrivateInvestment, na.color = "#808080", alpha = FALSE)
+pal_bank <- colorNumeric('inferno', domain = bank_proj_country_sub$PrivateDebt, na.color = "#808080", alpha = FALSE)
+pal_sponsor <- colorNumeric("plasma", domain= sponsors_country_sub$Sponsors, na.color = "#808080", alpha = FALSE)
+
+
+labels <- paste0("<strong>",proj_country_sub$admin, 
+                 "</strong><br/>Projects: ", prettyNum(proj_country_sub$Projects, big.mark = ","),
+                 "<br>Local/Municipal Projects: ", prettyNum(proj_country_sub$local, big.mark = ","),
+                 "<br>State/Provincial Projects: ", prettyNum(proj_country_sub$provincial, big.mark = ","),
+                "<br/>Total Private Investment (Millions USD): ", prettyNum(proj_country_sub$PrivateInvestment, big.mark = ",", digits=2),
+                "<br/>Total Private Debt (Millions USD): ", prettyNum(bank_proj_country_sub$PrivateDebt, big.mark = ",", digits=2),
+                "<br/>Sponsor Headquarters: ", prettyNum(sponsors_country_sub$Sponsors, big.mark = ","),
+                "<br/>Sponsor Investment (Millions USD): ", prettyNum(sponsors_country_sub$Investment,big.mark = ",", digits=2)) %>% lapply(htmltools::HTML)
+
+m2 <- leaflet(proj_country_sub) %>% 
+  setView(lng = 0, lat = 0, zoom = 2) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>% 
+  addPolygons(fillColor = ~pal_proj(PrivateInvestment),
+              color = "white",
+              weight = 1,
+              opacity = 1,
+              fillOpacity = 1,
+              highlight = highlightOptions(
+                weight = 2,
+                color = "white",
+                opacity = 1,
+                bringToFront = TRUE),
+              label = labels,
+              labelOptions = labelOptions(
+                style = list("font-weight" = "normal", padding = "3px 8px"),
+                textsize = "15px",
+                direction = "auto"),
+              group = "Projects") %>%
+  addLegend("bottomleft", pal = pal_proj, 
+            values = ~PrivateInvestment,
+            title = "Private Investment (Millions USD)",
+            opacity = 1,
+            group = "Projects") %>%
+  addPolygons(data = bank_proj_country_sub,
+              fillColor = ~pal_bank(PrivateDebt),
+              color = "white",
+              weight = 1,
+              opacity = 1,
+              fillOpacity = 1,
+              highlight = highlightOptions(
+                weight = 2,
+                color = "white",
+                opacity = 1,
+                bringToFront = TRUE),
+              label = labels,
+              labelOptions = labelOptions(
+                style = list("font-weight" = "normal", padding = "3px 8px"),
+                textsize = "15px",
+                direction = "auto"),
+              group = "Banks") %>%
+  addLegend("bottomright", pal = pal_bank, 
+            values = ~bank_proj_country_sub$PrivateDebt,
+            title = "Commercial Debt",
+            opacity = 1,
+            group = "Banks") %>% 
+  addPolygons(data = sponsors_country_sub,
+              fillColor = ~pal_sponsor(Sponsors),
+              color = "white",
+              weight = 1,
+              opacity = 1,
+              fillOpacity = 1,
+              highlight = highlightOptions(
+                weight = 2,
+                color = "white",
+                opacity = 1,
+                bringToFront = TRUE),
+              label = labels,
+              labelOptions = labelOptions(
+                style = list("font-weight" = "normal", padding = "3px 8px"),
+                textsize = "15px",
+                direction = "auto"),
+              group = "Sponsors") %>% 
+  addLegend("topleft", pal = pal_sponsor, 
+            values = ~sponsors_country_sub$Sponsors,
+            title = "Sponsors",
+            opacity = 1,
+            group = "Sponsors") %>% 
+  addLayersControl(
+    overlayGroups = c("Projects", "Banks", "Sponsors"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>% 
+  hideGroup(c("Banks", "Sponsors"))
+
+m2
+```
+
+# Notes
+
+[^1]: https://blogs.worldbank.org/ppps/forecasting-infrastructure-investment-needs-50-countries-7-sectors-through-2040 
+
+[^2]: https://www.oecd-ilibrary.org/sites/9789264308114-en/1/1/4/index.html?itemId=/content/publication/9789264308114-en&mimeType=text/html&_csp_=42b0131940390959a9137414165a17ca&itemIGO=oecd&itemContentType=book
+
+[^3]: https://www.worldbank.org/en/topic/publicprivatepartnerships/overview
+
+[^4]: https://ppi.worldbank.org/
+
+[^5]: https://ppi.worldbank.org/content/dam/PPI/resources/ppi_resources/topic/2017_Low_Carbon_Infrastructure_PPI.pdf
+
+[^6]: Throughout this analysis, categorical `r NA` are dropped and numerical `r NA` are treated as zeros, except for country summaries where they are left as `r NA` to differentiate missing data and recorded zeros. 
+
+[^7]: https://ppi.worldbank.org/en/methodology/glossary#letterS
