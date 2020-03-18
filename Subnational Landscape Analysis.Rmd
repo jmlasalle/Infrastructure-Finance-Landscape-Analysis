@@ -1,5 +1,5 @@
 ---
-title: "The Landscape Analysis of Subnational Private Investment in Infrastructure"
+title: "Landscape Analysis of Private Investment in Subnational Infrastructure"
 date: "`r Sys.Date()`"
 author: John Michael LaSalle
 output:
@@ -174,7 +174,7 @@ The dataset includes municipal and provincial governments’ projects, which all
 There are two major challenges that this landscape analysis hopes to inform. finding enough financing for badly needed infrastructure, and directing private investment into climate-resilient and low carbon infrastructure rather than high carbon-emitting infrastructure. For some projects, the data in the PPI Database is detailed enough to classify it as either low or high carbon, particularly for energy generation and transports, but others require more detail. The Public Private Partnership Group released a report in 2018 finding that there has been a partial shift towards renewables, primarily in the form of hydropower in energy, but road projects are still dominant in transport.[^5]
 
 #### Private Investment by Year
-```{r Investmetnt over time by government Level }
+```{r Investment Over Time by Government Level }
 data %>% 
   rename(Year = `Financial closure year`) %>% 
   group_by(Year, Government) %>% 
@@ -191,7 +191,7 @@ data %>%
   theme_classic()
 ```
 
-The PPI database has 335,950 infrastructure projects that were done by either local/municipal or state/provincial governments. Even though the focus of this paper is municipal governments, state/provincial projects are included, but disaggregated because of the responsibilities of municipal and provincial governments vary between countries.
+The PPI database has 2,816 infrastructure projects that were done by either local/municipal or state/provincial governments. Even though the focus of this paper is municipal governments, state/provincial projects are included, but disaggregated because of the responsibilities of municipal and provincial governments vary between countries.
 
 Data for local governments go back to 1992, provincial governments to 1985, and national governments to 1930. This paper only looked at projects since 1992 to make comparisons between different government types. The vast majority of private investment goes to national governments. Private investment in local projects is growing, with a large uptick since 2010. Investment in State/Provincial infrastructure peaked in 2010 and has declined to a lower level than investment in local governments.
 
